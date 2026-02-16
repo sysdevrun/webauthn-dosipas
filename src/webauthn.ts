@@ -1,13 +1,15 @@
 /**
- * WebAuthn helpers using the largeBlob extension to store / retrieve
- * an ECDSA P-256 private key.
+ * WebAuthn helpers using the PRF extension to deterministically derive
+ * an ECDSA P-256 private key from a credential secret + salt (ticket ID).
  *
- * Requirements:
- *  - A platform or roaming authenticator that supports the largeBlob extension.
- *  - The page must be served over HTTPS (or localhost).
+ * PRF flow:
+ *  1. Register: create a credential with `prf: {}` to enable the extension.
+ *  2. Derive:   authenticate with `prf: { eval: { first: salt } }`.
+ *               The authenticator returns 32 deterministic bytes.
+ *               Same credential + same salt = same output every time.
  */
 
-const RP_NAME = "WebAuthn Key Recovery Demo";
+const RP_NAME = "WebAuthn PRF Key Derivation";
 
 function rpId(): string {
   return window.location.hostname;
@@ -17,16 +19,10 @@ function randomChallenge(): BufferSource {
   return crypto.getRandomValues(new Uint8Array(32)) as BufferSource;
 }
 
-/**
- * Register a new credential **and** write the private key as a largeBlob.
- * `largeBlob: { support: "required" }` is passed during registration so the
- * ceremony fails if the authenticator doesn't support it.
- */
+/** Register a new credential with PRF enabled. */
 export async function register(
   username: string,
-  privateKeyBytes: Uint8Array,
-): Promise<{ credentialId: Uint8Array }> {
-  // Step 1: create the credential with largeBlob support required
+): Promise<void> {
   const createOptions: PublicKeyCredentialCreationOptions = {
     rp: { name: RP_NAME, id: rpId() },
     user: {
@@ -41,7 +37,7 @@ export async function register(
       userVerification: "required",
     },
     extensions: {
-      largeBlob: { support: "required" },
+      prf: {},
     },
   };
 
@@ -49,62 +45,33 @@ export async function register(
     publicKey: createOptions,
   })) as PublicKeyCredential | null;
 
-  if (!credential) throw new Error("Registration cancelled");
+  if (!credential) throw new Error("Registration cancelled.");
 
-  const extResults = credential.getClientExtensionResults() as AuthenticationExtensionsClientOutputs & {
-    largeBlob?: { supported?: boolean };
-  };
-  if (!extResults.largeBlob?.supported) {
+  const extResults = credential.getClientExtensionResults() as Record<string, unknown>;
+  const prfResult = extResults.prf as { enabled?: boolean } | undefined;
+  if (!prfResult?.enabled) {
     throw new Error(
-      "Authenticator does not support the largeBlob extension. " +
-        "Please use a compatible security key or platform authenticator.",
+      "Your authenticator does not support the PRF extension. " +
+        "Try a compatible security key or update Chrome.",
     );
   }
-
-  const credentialId = new Uint8Array(credential.rawId);
-
-  // Step 2: immediately do an assertion to write the blob
-  const getOptions: PublicKeyCredentialRequestOptions = {
-    challenge: randomChallenge(),
-    rpId: rpId(),
-    allowCredentials: [
-      { id: credentialId as BufferSource, type: "public-key" },
-    ],
-    userVerification: "required",
-    extensions: {
-      largeBlob: { write: privateKeyBytes as BufferSource },
-    },
-  };
-
-  const assertion = (await navigator.credentials.get({
-    publicKey: getOptions,
-  })) as PublicKeyCredential | null;
-
-  if (!assertion) throw new Error("Blob write assertion cancelled");
-
-  const writeResults = assertion.getClientExtensionResults() as AuthenticationExtensionsClientOutputs & {
-    largeBlob?: { written?: boolean };
-  };
-  if (!writeResults.largeBlob?.written) {
-    throw new Error("Failed to write private key to authenticator largeBlob.");
-  }
-
-  return { credentialId };
 }
 
 /**
- * Authenticate with an existing credential and read back the largeBlob
- * containing the private key.
+ * Authenticate and evaluate PRF with the given salt.
+ * Returns the raw 32-byte PRF output.
  */
-export async function authenticate(): Promise<{
-  privateKeyBytes: Uint8Array;
-}> {
+export async function deriveWithPrf(
+  salt: BufferSource,
+): Promise<Uint8Array> {
   const getOptions: PublicKeyCredentialRequestOptions = {
     challenge: randomChallenge(),
     rpId: rpId(),
     userVerification: "required",
     extensions: {
-      largeBlob: { read: true },
+      prf: {
+        eval: { first: salt },
+      },
     },
   };
 
@@ -112,16 +79,19 @@ export async function authenticate(): Promise<{
     publicKey: getOptions,
   })) as PublicKeyCredential | null;
 
-  if (!assertion) throw new Error("Authentication cancelled");
+  if (!assertion) throw new Error("Authentication cancelled.");
 
-  const extResults = assertion.getClientExtensionResults() as AuthenticationExtensionsClientOutputs & {
-    largeBlob?: { blob?: ArrayBuffer };
-  };
-  if (!extResults.largeBlob?.blob) {
+  const extResults = assertion.getClientExtensionResults() as Record<string, unknown>;
+  const prfResult = extResults.prf as {
+    results?: { first?: ArrayBuffer };
+  } | undefined;
+
+  if (!prfResult?.results?.first) {
     throw new Error(
-      "No largeBlob data returned. The authenticator may not contain a stored key for this credential.",
+      "PRF evaluation returned no result. " +
+        "Make sure you registered with a PRF-capable credential.",
     );
   }
 
-  return { privateKeyBytes: new Uint8Array(extResults.largeBlob.blob) };
+  return new Uint8Array(prfResult.results.first);
 }
