@@ -2,7 +2,7 @@
   "name": "webauthn-dosipas",
   "private": true,
   "version": "1.0.0",
-  "description": "WebAuthn largeBlob demo: generate, store, and recover an ECDSA P-256 private key",
+  "description": "Derive deterministic ECDSA P-256 private keys from a WebAuthn credential using the PRF extension",
   "author": "Théophile Helleboid",
   "license": "MIT",
   "type": "module",

@@ -19,10 +19,10 @@ function randomChallenge(): BufferSource {
   return crypto.getRandomValues(new Uint8Array(32)) as BufferSource;
 }
 
-/** Register a new credential with PRF enabled. */
+/** Register a new credential with PRF enabled.  Returns the credential ID. */
 export async function register(
   username: string,
-): Promise<void> {
+): Promise<Uint8Array> {
   const createOptions: PublicKeyCredentialCreationOptions = {
     rp: { name: RP_NAME, id: rpId() },
     user: {
@@ -55,14 +55,19 @@ export async function register(
         "Try a compatible security key or update Chrome.",
     );
   }
+
+  return new Uint8Array(credential.rawId);
 }
 
 /**
  * Authenticate and evaluate PRF with the given salt.
+ * If credentialId is provided, the assertion is scoped to that single
+ * credential — this ensures the same PRF secret is used every time.
  * Returns the raw 32-byte PRF output.
  */
 export async function deriveWithPrf(
   salt: BufferSource,
+  credentialId?: Uint8Array,
 ): Promise<Uint8Array> {
   const getOptions: PublicKeyCredentialRequestOptions = {
     challenge: randomChallenge(),
@@ -73,6 +78,11 @@ export async function deriveWithPrf(
         eval: { first: salt },
       },
     },
+    ...(credentialId && {
+      allowCredentials: [
+        { id: credentialId as BufferSource, type: "public-key" as const },
+      ],
+    }),
   };
 
   const assertion = (await navigator.credentials.get({
