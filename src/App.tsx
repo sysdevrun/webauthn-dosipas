@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { ticketIdToSalt, buildPkcs8, bytesToHex, bytesToPem } from "./crypto";
+import { useState, useRef } from "react";
+import { ticketIdToSalt, prfBytesToPkcs8, bytesToHex, bytesToPem } from "./crypto";
 import { register, deriveWithPrf } from "./webauthn";
 
 type Status = "idle" | "loading" | "success" | "error";
@@ -13,6 +13,7 @@ function App() {
   const [derivedKeyHex, setDerivedKeyHex] = useState("");
   const [derivedKeyPem, setDerivedKeyPem] = useState("");
   const [usedTicketId, setUsedTicketId] = useState("");
+  const credentialId = useRef<Uint8Array | undefined>(undefined);
 
   const handleRegister = async () => {
     if (!username.trim()) {
@@ -23,7 +24,7 @@ function App() {
     try {
       setStatus("loading");
       setMessage("Registering credential with PRF support...");
-      await register(username.trim());
+      credentialId.current = await register(username.trim());
       setRegistered(true);
       setStatus("success");
       setMessage(
@@ -45,9 +46,14 @@ function App() {
       setStatus("loading");
       setMessage("Authenticating and evaluating PRF...");
       const salt = await ticketIdToSalt(ticketId.trim());
-      const prfOutput = await deriveWithPrf(salt as BufferSource);
+      const prfOutput = await deriveWithPrf(
+        salt as BufferSource,
+        credentialId.current,
+      );
 
-      const pkcs8 = buildPkcs8(prfOutput);
+      setMessage("Importing as ECDSA P-256 key...");
+      const pkcs8 = await prfBytesToPkcs8(prfOutput);
+
       setDerivedKeyHex(bytesToHex(prfOutput));
       setDerivedKeyPem(bytesToPem(pkcs8));
       setUsedTicketId(ticketId.trim());
@@ -109,7 +115,8 @@ function App() {
               authenticator.
             </li>
             <li>
-              Your authenticator holds a <strong className="text-gray-300">unique secret</strong> per
+              Your authenticator holds a{" "}
+              <strong className="text-gray-300">unique secret</strong> per
               credential that never leaves the device.
             </li>
             <li>
@@ -117,8 +124,15 @@ function App() {
               Ticket ID), it outputs 32 deterministic bytes.
             </li>
             <li>
-              <strong className="text-gray-300">Same credential + same Ticket ID = same key</strong>,
-              every time, on any device with the same authenticator.
+              <strong className="text-gray-300">
+                Same credential + same Ticket ID = same key
+              </strong>
+              , every time, on any device with the same authenticator.
+            </li>
+            <li>
+              The 32-byte output is used as the raw scalar of an ECDSA P-256
+              private key. It is imported via Web Crypto to validate it and
+              produce a full PKCS#8 encoding.
             </li>
           </ul>
         </section>
@@ -211,7 +225,8 @@ function App() {
               Derived Private Key
             </h2>
             <p className="text-gray-400 text-xs">
-              Ticket ID: <code className="text-amber-300">{usedTicketId}</code>
+              Ticket ID:{" "}
+              <code className="text-amber-300">{usedTicketId}</code>
             </p>
 
             <div>

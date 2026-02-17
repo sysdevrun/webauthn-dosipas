@@ -6,12 +6,33 @@ export async function ticketIdToSalt(ticketId: string): Promise<Uint8Array> {
 }
 
 /**
- * PKCS#8 DER prefix for an EC P-256 private key (without public key).
+ * Import 32 raw PRF bytes as an ECDSA P-256 private key via Web Crypto,
+ * then re-export as PKCS#8 DER.  This guarantees the scalar is valid and
+ * the DER encoding includes the computed public point.
+ */
+export async function prfBytesToPkcs8(raw: Uint8Array): Promise<Uint8Array> {
+  const minimalDer = buildMinimalPkcs8(raw);
+  const key = await crypto.subtle.importKey(
+    "pkcs8",
+    minimalDer as BufferSource,
+    { name: "ECDSA", namedCurve: "P-256" },
+    true,
+    ["sign"],
+  );
+  const fullDer = await crypto.subtle.exportKey("pkcs8", key);
+  return new Uint8Array(fullDer);
+}
+
+/**
+ * PKCS#8 DER prefix for an EC P-256 private key (ECPrivateKey without
+ * the optional public key field).
  *
  *   SEQUENCE {
  *     INTEGER 0
  *     SEQUENCE { OID ecPublicKey, OID secp256r1 }
- *     OCTET STRING { SEQUENCE { INTEGER 1, OCTET STRING <32 bytes> } }
+ *     OCTET STRING {
+ *       SEQUENCE { INTEGER 1, OCTET STRING(32) <scalar> }
+ *     }
  *   }
  */
 const PKCS8_P256_PREFIX = new Uint8Array([
@@ -20,8 +41,7 @@ const PKCS8_P256_PREFIX = new Uint8Array([
   0x01, 0x07, 0x04, 0x27, 0x30, 0x25, 0x02, 0x01, 0x01, 0x04, 0x20,
 ]);
 
-/** Wrap a 32-byte private key scalar in PKCS#8 DER for P-256. */
-export function buildPkcs8(scalar: Uint8Array): Uint8Array {
+function buildMinimalPkcs8(scalar: Uint8Array): Uint8Array {
   const der = new Uint8Array(PKCS8_P256_PREFIX.length + scalar.length);
   der.set(PKCS8_P256_PREFIX);
   der.set(scalar, PKCS8_P256_PREFIX.length);
