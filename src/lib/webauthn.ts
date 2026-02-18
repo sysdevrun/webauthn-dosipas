@@ -1,15 +1,16 @@
 /**
- * WebAuthn helpers using the PRF extension to deterministically derive
- * an ECDSA P-256 private key from a credential secret + salt (ticket ID).
+ * WebAuthn helpers using the PRF extension.
  *
- * PRF flow:
- *  1. Register: create a credential with `prf: {}` to enable the extension.
- *  2. Derive:   authenticate with `prf: { eval: { first: salt } }`.
- *               The authenticator returns 32 deterministic bytes.
- *               Same credential + same salt = same output every time.
+ * Flow:
+ *  1. register(email): create a discoverable credential with PRF enabled.
+ *  2. authenticate(credentialId?): authenticate + evaluate PRF → 32 bytes.
+ *
+ * The PRF salt is a fixed application-specific value so that the same
+ * credential always produces the same 32-byte output (one credential =
+ * one identity = one deterministic key set).
  */
 
-const RP_NAME = "WebAuthn PRF Key Derivation";
+const RP_NAME = "DOSIPAS Ticket";
 
 function rpId(): string {
   return window.location.hostname;
@@ -19,16 +20,29 @@ function randomChallenge(): BufferSource {
   return crypto.getRandomValues(new Uint8Array(32)) as BufferSource;
 }
 
-/** Register a new credential with PRF enabled.  Returns the credential ID. */
-export async function register(
-  username: string,
-): Promise<Uint8Array> {
+/** Fixed PRF salt — SHA-256("dosipas-prf-v1") */
+async function prfSalt(): Promise<Uint8Array> {
+  const input = new TextEncoder().encode("dosipas-prf-v1");
+  const hash = await crypto.subtle.digest("SHA-256", input);
+  return new Uint8Array(hash);
+}
+
+export interface RegisterResult {
+  credentialId: Uint8Array;
+  prfSupported: boolean;
+}
+
+/**
+ * Register a new discoverable credential with PRF enabled.
+ * Returns the credential ID and whether PRF is supported.
+ */
+export async function register(email: string): Promise<RegisterResult> {
   const createOptions: PublicKeyCredentialCreationOptions = {
     rp: { name: RP_NAME, id: rpId() },
     user: {
       id: crypto.getRandomValues(new Uint8Array(16)) as BufferSource,
-      name: username,
-      displayName: username,
+      name: email,
+      displayName: email,
     },
     challenge: randomChallenge(),
     pubKeyCredParams: [{ alg: -7, type: "public-key" }], // ES256
@@ -47,35 +61,35 @@ export async function register(
 
   if (!credential) throw new Error("Registration cancelled.");
 
-  const extResults = credential.getClientExtensionResults() as Record<string, unknown>;
+  const extResults = credential.getClientExtensionResults() as Record<
+    string,
+    unknown
+  >;
   const prfResult = extResults.prf as { enabled?: boolean } | undefined;
-  if (!prfResult?.enabled) {
-    throw new Error(
-      "Your authenticator does not support the PRF extension. " +
-        "Try a compatible security key or update Chrome.",
-    );
-  }
 
-  return new Uint8Array(credential.rawId);
+  return {
+    credentialId: new Uint8Array(credential.rawId),
+    prfSupported: prfResult?.enabled === true,
+  };
 }
 
 /**
- * Authenticate and evaluate PRF with the given salt.
- * If credentialId is provided, the assertion is scoped to that single
- * credential — this ensures the same PRF secret is used every time.
+ * Authenticate with PRF evaluation using the fixed application salt.
+ * If credentialId is provided, scopes to that credential.
  * Returns the raw 32-byte PRF output.
  */
-export async function deriveWithPrf(
-  salt: BufferSource,
+export async function authenticate(
   credentialId?: Uint8Array,
 ): Promise<Uint8Array> {
+  const salt = await prfSalt();
+
   const getOptions: PublicKeyCredentialRequestOptions = {
     challenge: randomChallenge(),
     rpId: rpId(),
     userVerification: "required",
     extensions: {
       prf: {
-        eval: { first: salt },
+        eval: { first: salt as BufferSource },
       },
     },
     ...(credentialId && {
@@ -91,7 +105,10 @@ export async function deriveWithPrf(
 
   if (!assertion) throw new Error("Authentication cancelled.");
 
-  const extResults = assertion.getClientExtensionResults() as Record<string, unknown>;
+  const extResults = assertion.getClientExtensionResults() as Record<
+    string,
+    unknown
+  >;
   const prfResult = extResults.prf as {
     results?: { first?: ArrayBuffer };
   } | undefined;
@@ -99,7 +116,7 @@ export async function deriveWithPrf(
   if (!prfResult?.results?.first) {
     throw new Error(
       "PRF evaluation returned no result. " +
-        "Make sure you registered with a PRF-capable credential.",
+        "Make sure you registered with a PRF-capable authenticator.",
     );
   }
 
